@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Treatment Recommender · Collaborative Filtering</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#f6f7f9;--card:#fff;--ink:#1c2430;--mute:#667085;--line:#e3e7ee;--accent:#0f766e;--accent2:#b45309;--bar:#d5dbe4;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#12161c;--card:#1b212a;--ink:#e8ecf2;--mute:#9aa4b2;--line:#2c3541;--accent:#2dd4bf;--accent2:#fbbf24;--bar:#3a4554;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#12161c;--card:#1b212a;--ink:#e8ecf2;--mute:#9aa4b2;--line:#2c3541;--accent:#2dd4bf;--accent2:#fbbf24;--bar:#3a4554;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:920px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:15px;margin:0 0 12px}
+.sub{color:var(--mute);margin:0 0 18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+label{display:block;font-size:12px;color:var(--mute);margin-bottom:3px}
+select,input[type=file]{width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:inherit}
+input[type=range]{width:100%;accent-color:var(--accent)}
+button{font:inherit;padding:9px 16px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
+button.p{background:var(--accent);border-color:var(--accent);color:#fff}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) button.p{color:#06201d}}
+button:disabled{opacity:.45;cursor:not-allowed}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:14px}
+.status{color:var(--mute);font-size:13px}
+.verdict{font-size:20px;font-weight:650}
+.yes{color:var(--accent)}.no{color:var(--accent2)}
+.bar{display:flex;align-items:center;gap:10px;margin:6px 0}
+.bar span.l{width:70px;font-size:13px}
+.bar .t{flex:1;height:14px;background:var(--bar);border-radius:7px;overflow:hidden}
+.bar .f{height:100%;background:var(--accent);border-radius:7px}
+.bar .f.alt{background:var(--accent2)}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mute);font-weight:600}
+.warn{color:var(--accent2);font-size:13px;margin-top:8px}
+.note{color:var(--mute);font-size:12px;margin-top:10px}
+svg text{fill:var(--mute);font-size:11px}
+.hide{display:none}
+</style>
+</head>
+<body>
+<main>
+<h1>Mental-health treatment recommender</h1>
+<p class="sub">User-based collaborative filtering with cosine similarity. Target: <b>Treatment</b>.</p>
+
+<section class="card">
+  <h2>1 · Load your dataset</h2>
+  <label for="file">Choose Mental.csv (it stays in your browser; nothing is uploaded)</label>
+  <input id="file" type="file" accept=".csv,text/csv">
+  <div class="status" id="status">No data loaded yet.</div>
+</section>
+
+<section class="card hide" id="formCard">
+  <h2>2 · Describe the individual</h2>
+  <div class="grid" id="form"></div>
+  <div style="margin-top:14px">
+    <label>Neighbours (k): <b id="kv">200</b> most similar patients</label>
+    <input id="k" type="range" min="5" max="2000" step="5" value="200">
+  </div>
+  <div class="row">
+    <button class="p" id="go">Recommend treatment</button>
+    <button id="rand">Load random patient</button>
+    <button id="eval">Evaluate &amp; choose k</button>
+  </div>
+</section>
+
+<section class="card hide" id="resCard">
+  <h2>3 · Recommendation</h2>
+  <div id="res"></div>
+</section>
+
+<section class="card hide" id="evCard">
+  <h2>Model check (hold-out)</h2>
+  <div id="ev"></div>
+</section>
+
+<p class="note">Decision-support demo only, not a medical diagnosis. Cosine similarity between one-hot patient vectors equals (matching features ÷ total features), so the neighbours are the patients who share the most answers with the profile above.</p>
+</main>
+
+<script>
+(function(){
+"use strict";
+var $=function(id){return document.getElementById(id)};
+var D=null; // dataset state
+
+/* ---------- CSV parsing ---------- */
+function parseCSV(t){
+  var rows=[],row=[],f="",q=false,i=0,n=t.length,c;
+  if(t.charCodeAt(0)===0xFEFF)i=1;
+  for(;i<n;i++){
+    c=t[i];
+    if(q){
+      if(c==='"'){if(t[i+1]==='"'){f+='"';i++}else q=false}else f+=c;
+    }else if(c==='"')q=true;
+    else if(c===","){row.push(f);f=""}
+    else if(c==="\n"||c==="\r"){
+      if(c==="\r"&&t[i+1]==="\n")i++;
+      row.push(f);f="";
+      if(row.length>1||row[0]!=="")rows.push(row);
+      row=[];
+    }else f+=c;
+  }
+  if(f!==""||row.length){row.push(f);rows.push(row)}
+  return rows;
+}
+
+/* ---------- Build dataset (mirrors your notebook cleaning) ---------- */
+function build(rows){
+  var head=rows[0].map(function(h){return h.trim()});
+  var tIdx=head.findIndex(function(h){return h.toLowerCase().replace(/[^a-z]/g,"")==="treatment"});
+  if(tIdx<0)throw new Error("No “Treatment” column found.");
+  var fIdx=[];
+  head.forEach(function(h,i){
+    var norm=h.toLowerCase();
+    if(i===tIdx||norm==="timestamp"||/\.\d+$/.test(h))return; // drop Timestamp and duplicated columns like SocialWeakness.1
+    fIdx.push(i);
+  });
+  var seen=new Set(),clean=[],body=rows.slice(1);
+  body.forEach(function(r){
+    if(r.length<head.length)return;
+    var key=fIdx.map(function(i){return r[i]}).join("\u0001")+"\u0001"+r[tIdx];
+    if(seen.has(key))return;seen.add(key);
+    if(!r[tIdx]||!r[tIdx].trim())return;
+    clean.push(r);
+  });
+  var F=fIdx.length,N=clean.length;
+  var feats=fIdx.map(function(i){return head[i]});
+  var maps=feats.map(function(){return new Map()}),labels=feats.map(function(){return []});
+  var cMap=new Map(),classes=[];
+  var X=new Uint16Array(N*F),y=new Uint8Array(N);
+  for(var r=0;r<N;r++){
+    var row=clean[r];
+    for(var f=0;f<F;f++){
+      var v=(row[fIdx[f]]||"").trim()||"Unknown";
+      var code=maps[f].get(v);
+      if(code===undefined){code=labels[f].length;maps[f].set(v,code);labels[f].push(v)}
+      X[r*F+f]=code;
+    }
+    var tv=row[tIdx].trim();
+    var ci=cMap.get(tv);
+    if(ci===undefined){ci=classes.length;cMap.set(tv,ci);classes.push(tv)}
+    y[r]=ci;
+  }
+  return {F:F,N:N,feats:feats,labels:labels,X:X,y:y,classes:classes,C:classes.length,raw:body.length};
+}
+
+/* ---------- Collaborative filtering core ---------- */
+// histogram[m*C+c] = number of patients (of class c) sharing exactly m features with the query
+function histogram(q,mask){
+  var F=D.F,C=D.C,X=D.X,y=D.y,N=D.N,h=new Float64Array((F+1)*C);
+  for(var i=0,o=0;i<N;i++,o+=F){
+    if(mask&&!mask[i])continue;
+    var m=0;
+    for(var f=0;f<F;f++)if(X[o+f]===q[f])m++;
+    h[m*C+y[i]]++;
+  }
+  return h;
+}
+// take the k most similar patients (similarity = m/F), ties split proportionally
+function vote(h,k){
+  var F=D.F,C=D.C,rem=k,scores=new Float64Array(C),buckets=[];
+  for(var m=F;m>=1&&rem>0;m--){
+    var tot=0,c;for(c=0;c<C;c++)tot+=h[m*C+c];
+    if(!tot)continue;
+    var take=Math.min(rem,tot),frac=take/tot,sim=m/F;
+    var part=[];
+    for(c=0;c<C;c++){scores[c]+=sim*h[m*C+c]*frac;part.push(h[m*C+c])}
+    buckets.push({m:m,sim:sim,tot:tot,used:take,counts:part});
+    rem-=take;
+  }
+  var s=0;for(var c2=0;c2<C;c2++)s+=scores[c2];
+  for(var c3=0;c3<C;c3++)scores[c3]=s?scores[c3]/s:0;
+  return {scores:scores,buckets:buckets};
+}
+
+/* ---------- UI ---------- */
+function pct(x){return (x*100).toFixed(1)+"%"}
+function isYes(s){return String(s).toLowerCase()==="yes"}
+function currentQuery(){
+  return D.feats.map(function(_,f){return +$("sel"+f).value});
+}
+function recommend(){
+  var q=currentQuery(),k=+$("k").value;
+  var out=vote(histogram(q,null),k),sc=out.scores,best=0;
+  for(var c=1;c<D.C;c++)if(sc[c]>sc[best])best=c;
+  var name=D.classes[best],yes=isYes(name);
+  var h='<div class="verdict '+(yes?"yes":"no")+'">'+(yes?"Seek treatment":"No treatment indicated")+' <span style="font-weight:400;color:var(--mute)">(Treatment = '+name+')</span></div>';
+  h+='<div class="status">Confidence '+pct(sc[best])+' based on the '+k+' most similar patients</div><div style="margin-top:10px">';
+  D.classes.forEach(function(cl,c){
+    h+='<div class="bar"><span class="l">'+cl+'</span><div class="t"><div class="f'+(isYes(cl)?"":" alt")+'" style="width:'+(sc[c]*100).toFixed(1)+'%"></div></div><span>'+pct(sc[c])+'</span></div>';
+  });
+  h+='</div>';
+  if(sc[best]<0.6)h+='<div class="warn">Low confidence: similar patients are split, so treat this as inconclusive.</div>';
+  h+='<h2 style="margin-top:16px">Closest matching patient groups</h2><div class="scroll"><table><tr><th>Shared answers</th><th>Cosine</th><th>Patients used</th>';
+  D.classes.forEach(function(cl){h+='<th>'+cl+'</th>'});
+  h+='</tr>';
+  out.buckets.slice(0,8).forEach(function(b){
+    h+='<tr><td>'+b.m+' of '+D.F+'</td><td>'+b.sim.toFixed(3)+'</td><td>'+Math.round(b.used).toLocaleString()+'</td>';
+    b.counts.forEach(function(n){h+='<td>'+(b.tot?pct(n/b.tot):"–")+'</td>'});
+    h+='</tr>';
+  });
+  h+='</table></div>';
+  $("res").innerHTML=h;$("resCard").classList.remove("hide");
+}
+function randomPatient(){
+  var i=Math.floor(Math.random()*D.N);
+  for(var f=0;f<D.F;f++)$("sel"+f).value=D.X[i*D.F+f];
+  recommend();
+}
+
+/* ---------- Hold-out evaluation (sampled so it stays fast) ---------- */
+function evaluate(){
+  var btn=$("eval");btn.disabled=true;
+  var N=D.N,F=D.F,C=D.C;
+  var idx=Array.from({length:N},function(_,i){return i});
+  var s=42;function rnd(){s=(s*1664525+1013904223)>>>0;return s/4294967296}
+  for(var i=N-1;i>0;i--){var j=Math.floor(rnd()*(i+1));var t=idx[i];idx[i]=idx[j];idx[j]=t}
+  var nTest=Math.floor(N*0.2),mask=new Uint8Array(N).fill(1);
+  for(var a=0;a<nTest;a++)mask[idx[a]]=0;
+  var SAMPLE=Math.min(400,nTest),grid=[5,15,25,50,100,200,400,800,1500];
+  var correct=new Array(grid.length).fill(0),done=0;
+  var classTrain=new Array(C).fill(0);
+  for(var n=0;n<N;n++)if(mask[n])classTrain[D.y[n]]++;
+  var base=0;
+  $("evCard").classList.remove("hide");
+  function step(){
+    var end=Math.min(done+20,SAMPLE);
+    for(;done<end;done++){
+      var p=idx[done],q=new Array(F);
+      for(var f=0;f<F;f++)q[f]=D.X[p*F+f];
+      var h=histogram(q,mask);
+      grid.forEach(function(k,gi){
+        var sc=vote(h,k).scores,b=0;
+        for(var c=1;c<C;c++)if(sc[c]>sc[b])b=c;
+        if(b===D.y[p])correct[gi]++;
+      });
+      if(D.y[p]===classTrain.indexOf(Math.max.apply(null,classTrain)))base++;
+    }
+    $("ev").innerHTML='<div class="status">Evaluating… '+done+' / '+SAMPLE+' test patients</div>';
+    if(done<SAMPLE)setTimeout(step,0);else finish();
+  }
+  function finish(){
+    var acc=correct.map(function(c){return c/SAMPLE}),bl=base/SAMPLE;
+    var bi=0;acc.forEach(function(a,i){if(a>acc[bi])bi=i});
+    drawEval(grid,acc,bl,bi,SAMPLE);
+    $("k").value=Math.min(2000,grid[bi]);$("kv").textContent=$("k").value;
+    btn.disabled=false;
+  }
+  setTimeout(step,10);
+}
+function drawEval(grid,acc,bl,bi,n){
+  var W=560,H=220,L=44,R=12,T=12,B=30;
+  var lo=Math.min(bl,Math.min.apply(null,acc))-0.03,hi=Math.max(Math.max.apply(null,acc),bl)+0.03;
+  var xs=function(i){return L+i*(W-L-R)/(grid.length-1)},ys=function(v){return T+(hi-v)*(H-T-B)/(hi-lo)};
+  var pts=acc.map(function(a,i){return xs(i)+","+ys(a)}).join(" ");
+  var s='<svg viewBox="0 0 '+W+' '+H+'" width="100%" role="img" aria-label="Accuracy versus k">';
+  for(var g=0;g<=4;g++){var v=lo+(hi-lo)*g/4,y=ys(v);s+='<line x1="'+L+'" x2="'+(W-R)+'" y1="'+y+'" y2="'+y+'" stroke="var(--line)"/><text x="'+(L-6)+'" y="'+(y+4)+'" text-anchor="end">'+(v*100).toFixed(0)+'%</text>'}
+  s+='<line x1="'+L+'" x2="'+(W-R)+'" y1="'+ys(bl)+'" y2="'+ys(bl)+'" stroke="var(--mute)" stroke-dasharray="5 4"/>';
+  s+='<polyline fill="none" stroke="var(--accent)" stroke-width="2.5" points="'+pts+'"/>';
+  acc.forEach(function(a,i){s+='<circle cx="'+xs(i)+'" cy="'+ys(a)+'" r="'+(i===bi?5:3)+'" fill="var(--accent)"/><text x="'+xs(i)+'" y="'+(H-10)+'" text-anchor="middle">'+grid[i]+'</text>'});
+  s+='</svg>';
+  $("ev").innerHTML=s+'<div class="status">Best k = <b>'+grid[bi]+'</b> with accuracy <b>'+pct(acc[bi])+'</b> versus a majority-class baseline of '+pct(bl)+' (dashed line). Tested on '+n+' random held-out patients; the k slider has been set to the best value.</div>';
+}
+
+/* ---------- Load file ---------- */
+$("file").addEventListener("change",function(e){
+  var file=e.target.files[0];if(!file)return;
+  $("status").textContent="Reading "+file.name+"…";
+  var fr=new FileReader();
+  fr.onload=function(){
+    setTimeout(function(){
+      try{
+        var rows=parseCSV(fr.result);
+        D=build(rows);
+        var f=$("form");f.innerHTML="";
+        D.feats.forEach(function(name,i){
+          var opts=D.labels[i].map(function(l,c){return {l:l,c:c}}).sort(function(a,b){return a.l.localeCompare(b.l)});
+          var d=document.createElement("div");
+          d.innerHTML='<label for="sel'+i+'">'+name+'</label><select id="sel'+i+'">'+opts.map(function(o){return '<option value="'+o.c+'">'+o.l.replace(/&/g,"&amp;").replace(/</g,"&lt;")+'</option>'}).join("")+'</select>';
+          f.appendChild(d);
+        });
+        $("status").textContent=D.raw.toLocaleString()+" rows read, "+D.N.toLocaleString()+" after dropping duplicates · "+D.F+" features · classes: "+D.classes.join(", ");
+        $("formCard").classList.remove("hide");
+      }catch(err){$("status").textContent="Could not load: "+err.message}
+    },20);
+  };
+  fr.readAsText(file);
+});
+$("k").addEventListener("input",function(){$("kv").textContent=this.value});
+$("go").addEventListener("click",function(){recommend()});
+$("rand").addEventListener("click",randomPatient);
+$("eval").addEventListener("click",evaluate);
+})();
+</script>
+</body>
+</html> 
